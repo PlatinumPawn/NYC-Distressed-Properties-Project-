@@ -1,0 +1,91 @@
+                             model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+heuristic: C violations last month    0.0176  0.1443   0.6502           0.0118   0.3701     0.2104    NaN
+                           model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+heuristic: C violations last 12m    0.0176  0.2878   0.8545           0.0134   0.4432     0.2521    NaN
+                   model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+logreg (history + units)    0.0176  0.3703   0.9414           0.0187   0.5001     0.2844 0.0135
+                                 model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+xgb original 4 features (orig. params)    0.0176   0.331   0.9153           0.0178   0.4669     0.2654 0.0139
+              model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+xgb history + units    0.0176  0.3947   0.9473           0.0201   0.5174     0.2943 0.0131
+                     model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+xgb history + PLUTO static    0.0176  0.3959    0.948           0.0204   0.5178     0.2945 0.0131
+                      model  pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%  brier
+xgb full + scale_pos_weight    0.0176  0.3977   0.9481           0.0205   0.5195     0.2956 0.0299
+Backtest: 4 quarterly refits, train window 24 months, test months 2021-10..2022-09 (12 months, 3,334,508 building-months).
+Metrics pooled over all test rows; prec/recall@1% computed per month then averaged.
+
+                                        pos_rate  pr_auc  roc_auc  pr_auc_month_sd  prec@1%  recall@1%   brier
+model                                                                                                         
+heuristic: C violations last month        0.0176  0.1443   0.6502           0.0118   0.3701     0.2104     NaN
+heuristic: C violations last 12m          0.0176  0.2878   0.8545           0.0134   0.4432     0.2521     NaN
+logreg (history + units)                  0.0176  0.3703   0.9414           0.0187   0.5001     0.2844  0.0135
+xgb original 4 features (orig. params)    0.0176  0.3310   0.9153           0.0178   0.4669     0.2654  0.0139
+xgb history + units                       0.0176  0.3947   0.9473           0.0201   0.5174     0.2943  0.0131
+xgb history + PLUTO static                0.0176  0.3959   0.9480           0.0204   0.5178     0.2945  0.0131
+xgb full + scale_pos_weight               0.0176  0.3977   0.9481           0.0205   0.5195     0.2956  0.0299
+
+## Calibration (xgb history + PLUTO static, test deciles)
+
+       mean_pred  obs_rate       n
+score                             
+0         0.0002    0.0002  333451
+1         0.0004    0.0005  333451
+2         0.0006    0.0008  333451
+3         0.0008    0.0009  333450
+4         0.0010    0.0010  333451
+5         0.0012    0.0012  333451
+6         0.0019    0.0019  333450
+7         0.0039    0.0044  333451
+8         0.0135    0.0147  333451
+9         0.1565    0.1504  333451
+
+## Mean |SHAP| (last fold, 50k test rows sample)
+
+                mean_abs_shap
+months_since_c         1.1602
+units_res              0.4936
+housing311_12m         0.2832
+heat311_12m            0.2025
+viol_b_12m             0.1981
+housing311_1m          0.1573
+housing311_6m          0.1434
+housing311_3m          0.0975
+yearbuilt              0.0781
+numfloors              0.0765
+borough                0.0454
+heat311_1m             0.0437
+viol_a_12m             0.0434
+viol_c_12m             0.0400
+other311_6m            0.0299
+
+## Segment: cold
+
+                      rows  pos_rate  share_of_positives  pr_auc
+cold                                                            
+C in prior 12m      295652    0.1506              0.7584  0.4749
+no C in prior 12m  3038856    0.0047              0.2416  0.0922
+
+## Segment: size
+
+          rows  pos_rate  share_of_positives  pr_auc
+size                                                
+1-2    1598703    0.0025              0.0677  0.1333
+3-5     961586    0.0066              0.1083  0.1980
+6-19    458119    0.0309              0.2415  0.3002
+20-99   264022    0.1089              0.4898  0.4680
+100+     52078    0.1044              0.0926  0.5874
+
+## Segment: borough
+
+            rows  pos_rate  share_of_positives  pr_auc
+borough                                               
+0        1390815    0.0139              0.3302  0.3578
+1         419829    0.0457              0.3268  0.4921
+2         335558    0.0366              0.2091  0.3701
+3         995189    0.0071              0.1208  0.2792
+4         193117    0.0040              0.0130  0.2688
+
+Top-1% flagged rows with no C in prior 12m: 0.0079
+
+.venv/bin/python scripts/backtest.py  2621.01s user 303.41s system 265% cpu 18:21.95 total

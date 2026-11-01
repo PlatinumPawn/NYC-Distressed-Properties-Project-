@@ -1,183 +1,100 @@
-# NYC Distressed Properties Prediction
+# NYC Distressed Properties: next-month Class C violation risk
 
-A machine learning pipeline that predicts which residential properties in New York City are at risk of receiving hazardous code violations. Built using Python, XGBoost, and two years of NYC Open Data on tenant complaints and building violations.
+Predict which NYC residential buildings (by BBL) will receive at least one Class C
+("immediately hazardous") HPD violation next month, using their 311 complaint and violation
+history. Use case: rank buildings so an inspection team with fixed capacity visits the
+riskiest ones first. Every number here comes from a logged run; see `RESULTS.md`.
 
-## Problem Statement
+## Data (NYC Open Data, already on disk)
 
-Property investors and city housing agencies need early warning systems to identify buildings that are deteriorating before they reach crisis levels. The challenge is that NYC receives millions of 311 complaints annually, making it difficult to separate noise from genuine distress signals. This project attempts to answer: **Can we predict which properties will receive serious (Class C hazardous) violations in the next month based on their complaint history?**
+| Source | Rows | Coverage |
+|---|---|---|
+| 311 service requests (`erm2-nwe9`) | 20,530,586 | created 2012-11-01 .. 2022-10-28 |
+| HPD housing violations (`wvxf-dwi5`) | 7,094,173 (1,630,388 Class C) | approved 2012-11-01 .. 2024-05-14 |
+| PLUTO 25v3 | 858,284 lots (767,302 residential) | 2025 snapshot |
 
-## Dataset Overview
+The 311 extract stops in October 2022, so the modeling panel ends at 2022-09, the last
+complete month with both sources.
 
-I worked with three primary data sources, all from NYC Open Data:
+## Method
 
-**311 Service Requests** (~5-8 million records for 2012-2024)
-- Tenant complaints about heat, hot water, lead paint, illegal conversions, pests, etc.
-- Each request includes the property's BBL (Borough-Block-Lot ID) and creation date
-- Not all complaints result in confirmed violations, so volume alone isn't predictive
+- **Panel.** Dense building-month grid for 278,285 residential BBLs that have at least one HPD
+  violation or housing 311 complaint. A building enters the panel only once it has its first
+  record, so membership never uses future data. The table has 10,183,798 rows (2019-09 .. 2022-09).
+- **Target.** At least one Class C violation with `approveddate` in month t+1 (1.60% of rows).
+- **Features (month t and earlier only).** Counts over 1, 3, 6 and 12 months for heat 311,
+  other housing 311, non-housing 311, and Class A, B and C violations. Also months since the
+  last Class C violation and residential units. Computed with a count tensor and cumulative
+  sums, then checked against raw rows for 185 sampled building-months (0 mismatches).
+- **Evaluation.** Rolling-origin backtest: 4 quarterly refits, each trained on the previous
+  24 months and tested on the next 3 months, covering 2021-10 .. 2022-09 (3.33M
+  building-months). Metrics: PR-AUC, ROC-AUC, Brier score, and precision/recall when
+  inspecting the top 1% of buildings each month (about 2,780).
+- **Model.** XGBoost (400 trees, depth 6, learning rate 0.05), unweighted, so its
+  probabilities stay calibrated.
 
-**HPD Violations** (~2-3 million records for 2012-2024)
-- Official code violations issued by NYC Housing Preservation & Development
-- Classified by severity: Class A (non-hazardous), B (hazardous), C (immediately hazardous)
-- Class C violations indicate serious issues like no heat in winter, structural damage, lead paint
+## Results (`.venv/bin/python scripts/backtest.py`)
 
-**PLUTO** (858,284 properties, static snapshot)
-- NYC's master property database with building characteristics
-- Includes residential unit counts, year built, assessed value, ownership info
-- Critical for normalizing complaint volumes (a 200-unit building should have more complaints than a 2-unit building)
+| Model | PR-AUC | ROC-AUC | Precision@1% | Recall@1% |
+|---|---|---|---|---|
+| Heuristic: # Class C last month | 0.144 | 0.650 | 0.370 | 0.210 |
+| Heuristic: # Class C last 12 months | 0.288 | 0.855 | 0.443 | 0.252 |
+| Logistic regression | 0.370 | 0.941 | 0.500 | 0.284 |
+| XGBoost, original 4 features | 0.331 | 0.915 | 0.467 | 0.265 |
+| **XGBoost, final** | **0.395** | **0.947** | **0.517** | **0.294** |
 
-## Technical Approach
+Test positive rate is 1.76%. In the top 1% the final model is right 52% of the time, 29x the
+base rate, against 44% for the best heuristic. Monthly PR-AUC varies by about 0.02 (SD).
+ROC-AUC looks high mainly because most buildings are easy negatives; PR-AUC and
+precision@1% are the metrics that matter here.
 
-### Data Ingestion
+- **Calibration.** Predicted vs observed rate per test decile matches closely (top decile:
+  0.157 predicted vs 0.150 observed; `runs/backtest_results.md`). `scale_pos_weight` did not
+  improve ranking (within noise) and more than doubled the Brier score (0.013 to 0.030), so it
+  was dropped.
+- **What did not help.** PLUTO attributes (year built, floors, borough, public owner) raised
+  PR-AUC by 0.001, which is within noise, and they come from a 2025 snapshot. They are excluded.
+- **Drivers (mean |SHAP|).** Months since last Class C, residential units, 12-month housing
+  and heat 311 counts, and 12-month Class B violations.
+- **Errors.** 24% of positives are buildings with no Class C in the previous 12 months. PR-AUC
+  on those is 0.09 vs 0.47 for buildings with recent Class C, and they make up under 1% of
+  the top-1% list. Small buildings are hardest: PR-AUC 0.13 for 1-2 units vs 0.47-0.59 for 20+ units.
 
-Rather than downloading massive CSV files, I built an ingestion system that uses the Socrata Open Data API (SODA). The scripts fetch data in 50,000-record batches with rate limiting (2-second pauses) to stay within API quotas. Each batch is immediately written to Parquet format to avoid memory issues—important because the full 311 dataset from 2012 onward is several gigabytes.
+## What changed from the original version
 
-Key decisions here:
-- **Incremental writes**: Instead of loading all data into memory then saving once, each batch writes immediately using PyArrow's ParquetWriter. This keeps memory usage constant regardless of dataset size.
-- **BBL-only joins**: I deliberately avoided fuzzy address matching. Any record without a valid numeric BBL gets dropped during ingestion. This sacrifices some data volume but ensures join accuracy and speed.
-- **Checkpoint/resume capability**: The scripts save progress after every batch, so network interruptions don't mean starting over from zero.
+The first version reported ROC-AUC 0.879 / PR-AUC 0.639 / accuracy 0.793. Those numbers
+were invalid:
+1. 311 data ends in October 2022 but violations run to May 2024. Missing complaints were
+   zero-filled, and the 80/20 test split (2022-03 .. 2024-05) fell mostly in that gap.
+2. The panel only had rows for months with activity, so "next month" really meant "next active
+   month" (46% of gaps were longer than one month). That inflated the positive rate to 10.5%.
+3. The 6-month rolling sums were not grouped by building. 35% of rows mixed in another
+   BBL's history.
+4. Accuracy at a 0.5 threshold, with no baselines.
 
-The ingestion scripts are in `scripts/01_ingest_311_requests.py` and `scripts/02_ingest_hpd_violations.py`. Each handles its own dataset-specific quirks (different date column names, different record structures).
+## Limitations
 
-### Feature Engineering
+- Data ends in 2022 and the test year is a single period (2021-10 .. 2022-09). Results may not
+  carry over to later years or to HPD policy changes.
+- A violation is only recorded when an inspection happens, so the model partly predicts
+  inspector attention, not just building condition. Complaints trigger inspections.
+- The universe and units come from PLUTO 25v3. Lots that were merged or demolished before
+  2025 are missing (survivorship).
+- Universe membership is restricted to buildings that show up in HPD or housing 311 records
+  at some point. Rows are only created after a building's first record, but the universe
+  list itself uses the whole period.
 
-The core insight is that distressed properties show patterns over time—complaints don't appear in isolation. I engineered features at the monthly grain per property:
+## Usage
 
-**Monthly aggregations**:
-- Total 311 complaints per BBL per month
-- Total Class C violations per BBL per month
-
-**6-month rolling windows**:
-- `complaints_per_unit_6m`: Total complaints in the last 6 months divided by residential units
-- `class_c_per_unit_6m`: Total Class C violations in the last 6 months divided by residential units
-
-**Target variable**: Binary flag indicating whether a property receives at least one Class C violation in the *next* month
-
-This creates a supervised learning problem where we're predicting future violations based on historical complaint velocity. The per-unit normalization prevents large buildings from being unfairly flagged just because they have more tenants.
-
-Feature engineering logic lives in `distress_pipeline/features.py`.
-
-### Modeling
-
-I used XGBoost for binary classification. The model architecture:
-- 300 trees with max depth of 4 (prevents overfitting)
-- Learning rate of 0.1 with subsampling (0.8 row and column sampling)
-- AUC as the evaluation metric
-
-**Critical detail**: I implemented a time-aware train/test split. The first 80% of months go into the training set, and the remaining months are held out for testing. This prevents data leakage—we never train on future data to predict the past.
-
-I also built an expanding-window cross-validation option (`--run-cv` flag) that evaluates the model on each of the last N months independently, giving a more realistic view of production performance.
-
-Training and evaluation code is in `distress_pipeline/modeling.py`.
-
-## Project Structure
-
+```bash
+python3 -m venv .venv && .venv/bin/pip install pandas pyarrow numpy xgboost scikit-learn
+.venv/bin/python scripts/distress_pipeline.py --stage features   # writes data/features/panel_features.parquet
+.venv/bin/python scripts/backtest.py                             # ~18 min, writes runs/backtest_results.*
 ```
-├── distress_pipeline/          # Core pipeline package
-│   ├── config.py              # Dataset IDs, paths, API settings
-│   ├── ingestion.py           # SODA API client, Parquet batch writes
-│   ├── features.py            # Monthly aggregation and rolling windows
-│   └── modeling.py            # XGBoost training and time-based CV
-├── scripts/
-│   ├── distress_pipeline.py   # Main CLI orchestrator
-│   ├── 01_ingest_311_requests.py
-│   └── 02_ingest_hpd_violations.py
-├── data/
-│   ├── raw/                   # Parquet batches from API (not in repo)
-│   ├── processed/             # Cleaned/merged datasets
-│   └── features/              # Monthly feature table
-├── models/
-│   └── xgboost_distress.json  # Trained model
-├── requirements.txt
-└── .env.template              # API token configuration
-```
 
-## Setup and Usage
+`--stage ingest` re-pulls raw data from the Socrata API (needs `sodapy` and an app token).
+`models/xgboost_distress.json` and `data/features/monthly_features.parquet` are artifacts of
+the original pipeline and are not used.
 
-**Prerequisites**: Python 3.8+, an NYC Open Data API app token (free, takes 2 minutes to get)
-
-1. **Install dependencies**:
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   pip install -r requirements.txt
-   ```
-
-2. **Set your API token**:
-   ```bash
-   export NYC_OPEN_DATA_APP_TOKEN=your_token_here
-   ```
-   (Or add it to a `.env` file based on `.env.template`)
-
-3. **Run the full pipeline**:
-   ```bash
-   python scripts/distress_pipeline.py --stage all --start-date 2012-01-01
-   ```
-
-   This will:
-   - Ingest 311 complaints and HPD violations from 2012 onward
-   - Load PLUTO and build monthly features
-   - Train the XGBoost model and generate predictions
-
-4. **Run individual stages**:
-   ```bash
-   python scripts/distress_pipeline.py --stage ingest   # Just fetch data
-   python scripts/distress_pipeline.py --stage features # Just build features
-   python scripts/distress_pipeline.py --stage train    # Just train model
-   ```
-
-5. **Run cross-validation** (evaluates on last 10 months):
-   ```bash
-   python scripts/distress_pipeline.py --stage train --run-cv --cv-max-folds 10
-   ```
-
-## Results and Performance
-
-The model achieves an AUC of approximately **0.75-0.80** on the test set, which is solid for this type of noisy municipal data. Class C violations are rare events (~1-2% of property-months), so the model is dealing with severe class imbalance.
-
-Precision/recall tradeoff: By adjusting the prediction threshold, you can tune for high precision (fewer false alarms but might miss some distressed properties) or high recall (catch more distressed properties but with more false positives). The current default threshold optimizes for balanced F1 score.
-
-The most predictive features are unsurprisingly the 6-month rolling complaint densities—properties with sustained complaint patterns are much more likely to receive violations than those with isolated incidents.
-
-## Challenges and Learnings
-
-**Memory management**: Early versions tried to load all 311 data into memory at once, which crashed on machines with less than 16GB RAM. Switching to incremental Parquet writes was essential for scalability.
-
-**API rate limits**: NYC Open Data throttles aggressively if you don't use an app token. Even with a token, I needed retry logic and exponential backoff for occasional 429 errors during large fetches.
-
-**Temporal leakage**: My first model had suspiciously high accuracy (>0.95 AUC) because I wasn't careful about train/test splits. The data was shuffled randomly, meaning the model was learning from complaints that happened *after* violations occurred. Fixing this to a strict time-based split dropped accuracy to realistic levels but made the model actually deployable.
-
-**BBL data quality**: About 15-20% of 311 complaints don't have valid BBLs, either because the caller didn't provide an address or the geocoding failed. I chose to drop these rather than try fuzzy matching, which would have added complexity and introduced errors.
-
-**Feature engineering iteration**: I tried a lot of features that didn't work—building age, assessed value, neighborhood-level aggregations. The simplest features (raw complaint counts normalized by units) ended up being the strongest predictors. Sometimes the boring answer is the right one.
-
-## Future Improvements
-
-If I were to expand this project:
-- **Add DOB (Department of Buildings) complaints** for construction-related violations
-- **Incorporate property ownership changes** as a feature (flipped properties might have different risk profiles)
-- **Deploy as an API** with Flask or FastAPI for real-time predictions
-- **Build a simple frontend** to visualize high-risk properties on a map
-- **Experiment with LSTM/RNN models** to better capture temporal sequences of complaints
-
-## Why This Project Matters
-
-Beyond the technical exercise, this has real-world applications:
-- **Proactive code enforcement**: City agencies could prioritize inspections on high-risk properties before conditions deteriorate
-- **Investment risk assessment**: Real estate investors could screen potential acquisitions for hidden liabilities
-- **Tenant advocacy**: Housing rights organizations could identify buildings that need intervention
-
-The broader lesson here is that public data, when properly cleaned and modeled, can surface patterns that aren't obvious from raw complaint volumes alone.
-
-## Technologies Used
-
-- **Python 3.13**: Core language
-- **Pandas**: Data manipulation and aggregation
-- **XGBoost**: Gradient boosted trees for classification
-- **PyArrow/Parquet**: Efficient columnar storage
-- **Sodapy**: NYC Open Data API client
-- **scikit-learn**: Model evaluation metrics and utilities
-- **Git**: Version control
-
----
-
-**Questions or feedback?** Feel free to open an issue or reach out. I'm always interested in discussing data engineering tradeoffs or feature engineering approaches for time-series prediction problems.
+Code: `distress_pipeline/features.py` (panel and features), `distress_pipeline/modeling.py`
+(backtest, models, metrics), `scripts/backtest.py` (experiments and report).

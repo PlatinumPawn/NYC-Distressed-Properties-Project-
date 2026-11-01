@@ -1,222 +1,98 @@
 """
-Model training and scoring utilities for the NYC Real Estate Distress pipeline.
+Rolling-origin backtest, baselines and metrics for the next-month Class C target.
 """
 
 from __future__ import annotations
 
-from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable
 
 import numpy as np
 import pandas as pd
-from sklearn.metrics import (
-    accuracy_score,
-    average_precision_score,
-    classification_report,
-    precision_score,
-    roc_auc_score,
-)
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import FunctionTransformer, StandardScaler
 from xgboost import XGBClassifier
 
+from .features import SERIES, WINDOWS
 
-def time_based_split(
-    df: pd.DataFrame, date_col: str = "month", train_ratio: float = 0.8
-) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    """Split by month to preserve temporal order."""
-    unique_months = sorted(df[date_col].unique())
-    if not unique_months:
-        raise ValueError("No months available for splitting.")
-    split_idx = max(1, int(len(unique_months) * train_ratio))
-    split_month = unique_months[split_idx - 1]
-    train_df = df[df[date_col] <= split_month]
-    test_df = df[df[date_col] > split_month]
-    return train_df, test_df
+HISTORY = [f"{s}_{w}m" for s in SERIES for w in WINDOWS] + ["months_since_c"]
+STATIC = ["units_res", "yearbuilt", "numfloors", "borough", "public_owner"]
+FEATURE_SETS = {
+    # The original repo's four features, computed correctly on the dense panel.
+    "original4": ["all311_6m", "viol_c_6m", "units_res"],
+    "history": HISTORY + ["units_res"],
+    "full": HISTORY + STATIC,
+}
+
+# 4 quarterly refits covering 2021-10 .. 2022-09. A fold trains on the 24 feature
+# months ending the month before its first test month; that row's label is that
+# month's violations, which are known by prediction time.
+TEST_QUARTERS = ["2021-10", "2022-01", "2022-04", "2022-07"]
+TRAIN_MONTHS = 24
+TOP_FRAC = 0.01
 
 
-def train_model(features: pd.DataFrame):
-    """Train an XGBoost classifier and return the fitted model and eval metrics."""
-    feature_cols = [
-        "complaints_per_unit_6m",
-        "class_c_per_unit_6m",
-        "complaints_6m",
-        "class_c_violations_6m",
-    ]
+def xgb(**kw) -> XGBClassifier:
+    params = dict(n_estimators=400, learning_rate=0.05, max_depth=6, subsample=0.8,
+                  colsample_bytree=0.8, tree_method="hist", n_jobs=-1, random_state=0)
+    return XGBClassifier(**(params | kw))
 
-    features = features.dropna(subset=feature_cols + ["target_next_month"])
 
-    train_df, test_df = time_based_split(features)
-
-    X_train, y_train = train_df[feature_cols], train_df["target_next_month"]
-    X_test, y_test = test_df[feature_cols], test_df["target_next_month"]
-
-    pos = float(y_train.sum())
-    neg = float(len(y_train) - pos)
-    scale_pos_weight = neg / pos if pos > 0 else 1.0
-
-    model = XGBClassifier(
-        objective="binary:logistic",
-        learning_rate=0.1,
-        max_depth=4,
-        n_estimators=300,
-        subsample=0.8,
-        colsample_bytree=0.8,
-        eval_metric="auc",
-        n_jobs=4,
-        scale_pos_weight=scale_pos_weight,
+def logreg() -> object:
+    return make_pipeline(
+        FunctionTransformer(lambda x: np.log1p(np.clip(np.nan_to_num(x), 0, None))),
+        StandardScaler(),
+        LogisticRegression(max_iter=500),
     )
 
-    model.fit(X_train, y_train)
 
-    test_preds = model.predict_proba(X_test)[:, 1]
-    auc = roc_auc_score(y_test, test_preds) if len(np.unique(y_test)) > 1 else np.nan
-    pr_auc = average_precision_score(y_test, test_preds)
-    hard_preds = (test_preds > 0.5).astype(int)
-    report = classification_report(y_test, hard_preds, digits=3)
-    acc = accuracy_score(y_test, hard_preds)
-
-    metrics = {
-        "roc_auc": auc,
-        "pr_auc": pr_auc,
-        "accuracy": acc,
-        "classification_report": report,
-        "train_rows": int(len(train_df)),
-        "test_rows": int(len(test_df)),
-        "train_buildings": int(train_df["bbl"].nunique()),
-        "test_buildings": int(test_df["bbl"].nunique()),
-        "train_month_start": str(train_df["month"].min()),
-        "train_month_end": str(train_df["month"].max()),
-        "test_month_start": str(test_df["month"].min()),
-        "test_month_end": str(test_df["month"].max()),
-    }
-    return model, metrics
+def backtest(df: pd.DataFrame, cols: list[str] | None, make_model: Callable | None,
+             score_col: str | None = None) -> pd.DataFrame:
+    """Return out-of-sample scores for every test row. A model or a raw score column."""
+    out = []
+    for q in TEST_QUARTERS:
+        start = pd.Timestamp(q)
+        test = df[(df["month"] >= start) & (df["month"] < start + pd.DateOffset(months=3))]
+        if score_col:
+            score = test[score_col].to_numpy(dtype=float)
+        else:
+            train = df[(df["month"] < start)
+                       & (df["month"] >= start - pd.DateOffset(months=TRAIN_MONTHS))]
+            model = make_model().fit(train[cols], train["target"])
+            score = model.predict_proba(test[cols])[:, 1]
+        out.append(test[["bbl", "month", "target", "borough", "units_res", "viol_c_12m"]]
+                   .assign(score=score))
+    return pd.concat(out, ignore_index=True)
 
 
-def save_predictions(
-    model: XGBClassifier,
-    features: pd.DataFrame,
-    output_path: Path,
-    scoring_month: Optional[pd.Timestamp] = None,
-) -> None:
-    """
-    Score the latest month (or provided month) and persist probabilities by BBL.
-    """
-    feature_cols = [
-        "complaints_per_unit_6m",
-        "class_c_per_unit_6m",
-        "complaints_6m",
-        "class_c_violations_6m",
-    ]
-
-    if scoring_month is None:
-        scoring_month = features["month"].max()
-
-    scoring_frame = features[features["month"] == scoring_month].copy()
-    scoring_frame["distress_probability"] = model.predict_proba(scoring_frame[feature_cols])[:, 1]
-
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    scoring_frame[["bbl", "month", "distress_probability"]].to_parquet(
-        output_path, engine="pyarrow", compression="snappy", index=False
-    )
-
-    print(f"Wrote scoring data for {len(scoring_frame):,} buildings to {output_path}")
+def top_k(g: pd.DataFrame, frac: float = TOP_FRAC) -> pd.Series:
+    """Precision/recall when inspecting the top `frac` of buildings in a month."""
+    k = max(1, int(round(len(g) * frac)))
+    # Random tie-break so coarse scores (e.g. counts) are not flattered by row order.
+    rng = np.random.default_rng(0)
+    order = np.lexsort((rng.random(len(g)), -g["score"].to_numpy()))
+    hits = g["target"].to_numpy()[order[:k]].sum()
+    return pd.Series({"precision": hits / k, "recall": hits / max(g["target"].sum(), 1)})
 
 
-def rolling_monthly_cv(
-    features: pd.DataFrame,
-    min_train_months: int = 6,
-    max_folds: Optional[int] = None,
-    threshold: float = 0.5,
-):
-    """
-    Expanding-window CV: for each target month (after an initial training window),
-    train on all prior months and score only that month. Returns per-fold metrics
-    plus overall means (ignoring NaN AUCs when class is single-valued).
-    """
-    feature_cols = [
-        "complaints_per_unit_6m",
-        "class_c_per_unit_6m",
-        "complaints_6m",
-        "class_c_violations_6m",
-    ]
-
-    features = features.dropna(subset=feature_cols + ["target_next_month"])
-
-    months = sorted(features["month"].unique())
-    if len(months) < min_train_months + 1:
-        raise ValueError("Not enough months to run rolling CV with the given min_train_months.")
-
-    target_months = months[min_train_months:]
-    if max_folds:
-        target_months = target_months[-max_folds:]
-
-    fold_metrics = []
-    for target_month in target_months:
-        train_df = features[features["month"] < target_month]
-        test_df = features[features["month"] == target_month]
-
-        if train_df.empty or test_df.empty:
-            continue
-
-        pos = float(train_df["target_next_month"].sum())
-        neg = float(len(train_df) - pos)
-        scale_pos_weight = neg / pos if pos > 0 else 1.0
-
-        model = XGBClassifier(
-            objective="binary:logistic",
-            learning_rate=0.1,
-            max_depth=4,
-            n_estimators=300,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            eval_metric="auc",
-            n_jobs=4,
-            scale_pos_weight=scale_pos_weight,
-        )
-
-        X_train, y_train = train_df[feature_cols], train_df["target_next_month"]
-        X_test, y_test = test_df[feature_cols], test_df["target_next_month"]
-
-        model.fit(X_train, y_train)
-
-        probs = model.predict_proba(X_test)[:, 1]
-        auc = roc_auc_score(y_test, probs) if len(np.unique(y_test)) > 1 else np.nan
-        pr_auc = average_precision_score(y_test, probs)
-        preds = (probs >= threshold).astype(int)
-        precision = precision_score(y_test, preds, zero_division=0)
-        prevalence = float(y_test.mean())
-
-        fold_metrics.append(
-            {
-                "month": target_month,
-                "auc": auc,
-                "pr_auc": pr_auc,
-                "precision": precision,
-                "prevalence": prevalence,
-            }
-        )
-
-        month_label = getattr(target_month, "strftime", lambda fmt: str(target_month))("%Y-%m-%d")
-        print(
-            f"[CV] Target month {month_label}: AUC={auc:.3f} PR-AUC={pr_auc:.3f} "
-            f"Precision={precision:.3f} PosRate={prevalence:.3f} n={len(y_test)}"
-        )
-
-    auc_values = [m["auc"] for m in fold_metrics if not np.isnan(m["auc"])]
-    pr_values = [m["pr_auc"] for m in fold_metrics if not np.isnan(m["pr_auc"])]
-    precision_values = [m["precision"] for m in fold_metrics]
-
-    summary = {
-        "folds": fold_metrics,
-        "mean_auc": float(np.mean(auc_values)) if auc_values else np.nan,
-        "mean_pr_auc": float(np.mean(pr_values)) if pr_values else np.nan,
-        "mean_precision": float(np.mean(precision_values)) if precision_values else np.nan,
-        "fold_count": len(fold_metrics),
+def evaluate(pred: pd.DataFrame) -> dict:
+    by_month = pred.groupby("month")
+    tk = by_month.apply(top_k, include_groups=False)
+    y, s = pred["target"], pred["score"]
+    return {
+        "pos_rate": y.mean(),
+        "pr_auc": average_precision_score(y, s),
+        "roc_auc": roc_auc_score(y, s),
+        "pr_auc_month_sd": by_month.apply(
+            lambda g: average_precision_score(g["target"], g["score"]), include_groups=False).std(),
+        "prec@1%": tk["precision"].mean(),
+        "recall@1%": tk["recall"].mean(),
+        "brier": brier_score_loss(y, s) if s.between(0, 1).all() else np.nan,
     }
 
-    print(
-        f"[CV] Summary over {summary['fold_count']} folds: "
-        f"mean AUC={summary['mean_auc']:.3f} mean PR-AUC={summary['mean_pr_auc']:.3f} "
-        f"mean Precision={summary['mean_precision']:.3f}"
-    )
 
-    return summary
+def calibration_table(pred: pd.DataFrame, bins: int = 10) -> pd.DataFrame:
+    q = pd.qcut(pred["score"].rank(method="first"), bins, labels=False)
+    return pred.groupby(q).agg(mean_pred=("score", "mean"), obs_rate=("target", "mean"),
+                               n=("target", "size"))
