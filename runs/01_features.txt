@@ -1,4 +1,4 @@
-Persisted 10,183,798 rows x 34 cols to /Users/linuslindon/Documents/Job apps/projects/nyc-distress/data/features/panel_features.parquet
+Persisted 10,183,798 rows x 34 cols to data/features/panel_features.parquet
 (10183798, 34) 278285 2019-09-01 00:00:00 2022-09-01 00:00:00 0.015972233541945744
                  n       pos
 month                       

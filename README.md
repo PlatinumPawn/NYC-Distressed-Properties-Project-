@@ -26,7 +26,8 @@ Why PR-AUC and not accuracy? Only ~1.8% of building-months have a Class C violat
 always says "no" is 98% accurate and completely useless. 🙃 ROC-AUC is 0.947, but it looks good mostly
 because the easy negatives pad it.
 
-**Calibrated, too:** in the riskiest 10% of buildings it predicts 15.7% and the real rate is 15.0%.
+**Calibrated, too:** in the riskiest 10% of buildings it predicts 15.7% and the real rate is 15.0%
+(measured on the near-identical + PLUTO variant, see `RESULTS.md`).
 
 ## 🗽 Data
 
@@ -52,8 +53,8 @@ The 311 pull stops in Oct 2022, so the panel ends Sep 2022.
 5. **Model:** XGBoost, 400 trees, depth 6. No class reweighting: it barely changed the ranking and
    more than doubled the Brier score, so the probabilities stay honest.
 
-**What drives it (SHAP):** how recently the building had a Class C, how big it is, and its recent heat
-and housing complaints.
+**What drives it (SHAP, + PLUTO variant):** how recently the building had a Class C, how big it is, and
+its recent heat and housing complaints.
 
 ## 🐛 v1 was wrong (and that's the interesting part)
 

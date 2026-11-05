@@ -6,7 +6,7 @@ All runs on the data in `data/raw/` and `pluto_25v3.csv`, offline. Raw logs are 
 |---|---|---|
 | Original pipeline (unmodified code, commit e3ac040) | `.venv-orig/bin/python3 scripts/distress_pipeline.py --stage train` | `runs/00_original_pipeline.txt` |
 | Dense panel build | `.venv/bin/python scripts/distress_pipeline.py --stage features` (log came from an equivalent call to `features.run_feature_build`) | `runs/01_features.txt` |
-| Panel spot check vs raw rows | inline script, recorded in `log.md` | `runs/01b_feature_spotcheck.txt` |
+| Panel spot check vs raw rows | inline script (not saved): 5 random BBLs, 185 rows recomputed from raw data, 0 mismatches on viol_c_1m, viol_c_12m, heat311_3m and target | `runs/01b_feature_spotcheck.txt` |
 | Backtest table, calibration, SHAP, segments | `.venv/bin/python scripts/backtest.py` (18 min, 8 cores) | `runs/02_backtest.txt`, `runs/backtest_results.md`, `runs/backtest_results.csv` |
 
 ## Data counts (computed with pyarrow over all batch files)
@@ -37,3 +37,10 @@ The SD of monthly PR-AUC is about 0.02, so the last three rows are indistinguish
 
 ROC-AUC 0.879, PR-AUC 0.639, accuracy 0.793, test 2022-03 .. 2024-05 with a 22.3% positive rate.
 The sparse panel, cross-building rolling windows and zero-filled 311 data make these numbers invalid (see README).
+
+## Caveats
+
+- Calibration and SHAP in `runs/backtest_results.md` were computed for the "+ PLUTO static" variant, not the final model. Its metrics are nearly identical (table above); rerun `scripts/backtest.py` if exact figures for the final model are needed.
+- The panel was built by calling `features.run_feature_build` directly. The CLI path `--stage features` calls the same function but was not re-run end to end.
+- No paired significance test between models (predictions were not saved). The monthly PR-AUC SD is the only spread estimate.
+- Absolute local paths in `runs/*.txt` were trimmed to repo-relative paths.

@@ -1,5 +1,5 @@
-Persisted features to /Users/linuslindon/Documents/Job apps/projects/nyc-distress/data/features/monthly_features.parquet
-Saved model to /Users/linuslindon/Documents/Job apps/projects/nyc-distress/models/xgboost_distress.json
+Persisted features to data/features/monthly_features.parquet
+Saved model to models/xgboost_distress.json
 ROC-AUC: 0.8789377734490131
 PR-AUC: 0.6393655493636741
 Accuracy: 0.7926055476697225
@@ -14,5 +14,5 @@ Test rows: 600937 (buildings: 217342) months: 2022-03-01 00:00:00 to 2024-05-01 
    macro avg      0.732     0.806     0.748    600937
 weighted avg      0.848     0.793     0.807    600937
 
-Wrote scoring data for 3,255 buildings to /Users/linuslindon/Documents/Job apps/projects/nyc-distress/data/processed/current_month_predictions.parquet
+Wrote scoring data for 3,255 buildings to data/processed/current_month_predictions.parquet
 .venv-orig/bin/python3 scripts/distress_pipeline.py --stage train  68.61s user 22.66s system 82% cpu 1:50.96 total
